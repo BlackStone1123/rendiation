@@ -54,7 +54,7 @@ where
   type Output = Box<dyn std::any::Any>;
 
   fn poll_query(&mut self, cx: &mut Context) -> Self::Output {
-    let (_, _, m) = self.inner.poll_changes_with_inv_dyn(cx);
+    let (_, m) = self.inner.poll_changes_with_inv_dyn(cx).resolve_kept();
     Box::new(m)
   }
 }

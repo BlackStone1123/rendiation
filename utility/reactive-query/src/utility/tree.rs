@@ -165,16 +165,7 @@ where
   type Key = K;
   type Value = T;
   // how can we improve this??
-  type Compute = TreeDerivedDataCompute<
-    K,
-    T,
-    F,
-    BoxedDynQueryCompute<K, T>,
-    (
-      BoxedDynQuery<K, ValueChange<K>>,
-      OneManyRelationDualAccess<BoxedDynQuery<K, K>, BoxedDynMultiQuery<K, K>>,
-    ),
-  >;
+  type Compute = impl AsyncQueryCompute<Key = K, Value = T>;
 
   fn describe(&self, cx: &mut Context) -> Self::Compute {
     TreeDerivedDataCompute {

@@ -3,11 +3,91 @@ use crate::*;
 pub type BoxedDynReactiveOneToManyRelation<O, M> =
   Box<dyn DynReactiveOneToManyRelation<One = O, Many = M>>;
 
-pub type BoxedDynReactiveOneToManyRelationPoll<O, M> = (
+pub type DynReactiveOneToManyRelationPoll<O, M> = (
   BoxedDynQuery<M, ValueChange<O>>,
   BoxedDynQuery<M, O>,
   BoxedDynMultiQuery<O, M>,
 );
+
+pub trait DynOneToManyRelationCompute: Sync + Send + 'static {
+  type One: CKey;
+  type Many: CKey;
+  fn resolve_dyn(
+    &mut self,
+    cx: &QueryResolveCtx,
+  ) -> DynReactiveOneToManyRelationPoll<Self::One, Self::Many>;
+  fn create_task_dyn(
+    &mut self,
+    cx: &mut AsyncQueryCtx,
+  ) -> Pin<
+    Box<dyn Send + Sync + Future<Output = DynReactiveOneToManyRelationPoll<Self::One, Self::Many>>>,
+  >;
+}
+
+impl<T> DynOneToManyRelationCompute for T
+where
+  T: ReactiveOneToManyRelationCompute,
+{
+  type One = T::One;
+  type Many = T::Many;
+  fn resolve_dyn(
+    &mut self,
+    cx: &QueryResolveCtx,
+  ) -> DynReactiveOneToManyRelationPoll<Self::One, Self::Many> {
+    let (d, v) = self.resolve(cx);
+    (Box::new(d), Box::new(v.clone()), Box::new(v))
+  }
+  fn create_task_dyn(
+    &mut self,
+    cx: &mut AsyncQueryCtx,
+  ) -> Pin<
+    Box<dyn Send + Sync + Future<Output = DynReactiveOneToManyRelationPoll<Self::One, Self::Many>>>,
+  > {
+    Box::pin(self.create_task(cx).map(move |(d, v)| {
+      (
+        Box::new(d) as BoxedDynQuery<Self::Many, ValueChange<Self::One>>,
+        Box::new(v.clone()) as BoxedDynQuery<Self::Many, Self::One>,
+        Box::new(v) as BoxedDynMultiQuery<Self::One, Self::Many>,
+      )
+    }))
+  }
+}
+
+pub type BoxedDynOneToManyRelationCompute<O, M> =
+  Box<dyn DynOneToManyRelationCompute<One = O, Many = M>>;
+
+impl<O: CKey, M: CKey> QueryCompute for BoxedDynOneToManyRelationCompute<O, M> {
+  type Key = M;
+  type Value = O;
+  type Changes = Box<dyn DynQuery<Key = M, Value = ValueChange<O>>>;
+  type View = OneManyRelationDualAccess<
+    Box<dyn DynQuery<Key = M, Value = O>>,
+    Box<dyn DynMultiQuery<Key = O, Value = M>>,
+  >;
+  fn resolve(&mut self, cx: &QueryResolveCtx) -> (Self::Changes, Self::View) {
+    let (d, v, v2) = self.deref_mut().resolve_dyn(cx);
+    let v = OneManyRelationDualAccess {
+      many_access_one: v,
+      one_access_many: v2,
+    };
+    (d, v)
+  }
+}
+
+impl<O: CKey, M: CKey> AsyncQueryCompute for BoxedDynOneToManyRelationCompute<O, M> {
+  type Task = impl Future<Output = (Self::Changes, Self::View)> + 'static;
+  fn create_task(&mut self, cx: &mut AsyncQueryCtx) -> Self::Task {
+    self.deref_mut().create_task_dyn(cx).map(|(d, v, v2)| {
+      (
+        d,
+        OneManyRelationDualAccess {
+          many_access_one: v,
+          one_access_many: v2,
+        },
+      )
+    })
+  }
+}
 
 pub trait DynReactiveOneToManyRelation: Send + Sync {
   type One: CKey;
@@ -17,7 +97,7 @@ pub trait DynReactiveOneToManyRelation: Send + Sync {
   fn poll_changes_with_inv_dyn(
     &self,
     cx: &mut Context,
-  ) -> BoxedDynReactiveOneToManyRelationPoll<Self::One, Self::Many>;
+  ) -> BoxedDynOneToManyRelationCompute<Self::One, Self::Many>;
 
   fn extra_request_dyn(&mut self, request: &mut ReactiveQueryRequest);
 }
@@ -31,9 +111,8 @@ where
   fn poll_changes_with_inv_dyn(
     &self,
     cx: &mut Context,
-  ) -> BoxedDynReactiveOneToManyRelationPoll<Self::One, Self::Many> {
-    let (d, v) = self.describe(cx).resolve_kept();
-    (Box::new(d), Box::new(v.clone()), Box::new(v))
+  ) -> BoxedDynOneToManyRelationCompute<Self::One, Self::Many> {
+    Box::new(self.describe(cx))
   }
 
   fn extra_request_dyn(&mut self, request: &mut ReactiveQueryRequest) {
@@ -48,17 +127,9 @@ where
 {
   type Key = M;
   type Value = O;
-  type Compute = (
-    BoxedDynQuery<M, ValueChange<O>>,
-    OneManyRelationDualAccess<BoxedDynQuery<M, O>, BoxedDynMultiQuery<O, M>>,
-  );
+  type Compute = BoxedDynOneToManyRelationCompute<O, M>;
   fn describe(&self, cx: &mut Context) -> Self::Compute {
-    let (d, v, v2) = (**self).poll_changes_with_inv_dyn(cx);
-    let v = OneManyRelationDualAccess {
-      many_access_one: v,
-      one_access_many: v2,
-    };
-    (d, v)
+    (**self).poll_changes_with_inv_dyn(cx)
   }
   fn request(&mut self, request: &mut ReactiveQueryRequest) {
     self.deref_mut().extra_request_dyn(request)
